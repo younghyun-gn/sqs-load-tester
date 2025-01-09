@@ -16,7 +16,7 @@ panic = "abort"
 anyhow = "1.0.95"
 aws-config = { version = "1.5.13", features = ["behavior-version-latest"] }
 aws-sdk-sqs = { version = "1.53.0", features = ["behavior-version-latest"] }
-rand = { version = "0.8.5", features = ["simd_support"] }
+rand = { version = "0.8.5", features = [] }
 tokio = { version = "1.43.0", features = [
     "macros",
     "rt-multi-thread",
