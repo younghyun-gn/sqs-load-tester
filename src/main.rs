@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::spawn;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn};
 
 struct SQSMessage {
     body: String,
@@ -20,6 +20,8 @@ const QUEUE_URL: &str =
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     tracing_subscriber::fmt::init();
+    info!("SQS load tester");
+    warn!("비용 발생의 위험이 있으니 주의하세요!");
 
     let region_provider =
         RegionProviderChain::first_try(Region::new("ap-northeast-2")).or_default_provider();
@@ -32,11 +34,12 @@ async fn main() {
 
     // Thread for logging message count and rate per second
     spawn(async move {
+        let mut total: usize = 0;
         loop {
-            let current_count = counter_clone.load(Ordering::SeqCst);
-            info!("Total messages sent: {}", current_count);
-            info!("Messages per second: {}", current_count);
-            counter_clone.store(0, Ordering::SeqCst);
+            let current_count = counter_clone.load(Ordering::Relaxed);
+            total += current_count;
+            info!("messages/s: {}; total: {}", current_count, total);
+            counter_clone.store(0, Ordering::Relaxed);
             sleep(Duration::from_secs(1)).await;
         }
     });
@@ -45,36 +48,51 @@ async fn main() {
     let send_client = client.clone();
     let counter_clone = Arc::clone(&counter);
 
+    let num_threads = num_cpus::get() * 1000;
+    let send_counter_clone = Arc::clone(&counter);
+    let recv_counter_clone = Arc::clone(&counter);
+
+    // Spawn threads for sending messages in parallel
+    for _ in 0..num_threads {
+        let send_client = client.clone();
+        let send_counter_clone = Arc::clone(&send_counter_clone);
+
+        spawn(async move {
+            loop {
+                let size = rand::thread_rng().gen_range(128..=256);
+                let random_string: String = rand::thread_rng()
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(size)
+                    .map(char::from)
+                    .collect();
+
+                let message = SQSMessage {
+                    body: random_string,
+                };
+
+                if let Err(err) = send(&send_client, QUEUE_URL, &message).await {
+                    eprintln!("Failed to send message: {:?}", err);
+                } else {
+                    send_counter_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    // Separate thread for receiving messages
     spawn(async move {
         loop {
-            let size = rand::thread_rng().gen_range(128..=256);
-            let random_string: String = rand::thread_rng()
-                .sample_iter(&rand::distributions::Alphanumeric)
-                .take(size)
-                .map(char::from)
-                .collect();
-
-            let message = SQSMessage {
-                body: random_string,
-            };
-
-            if let Err(err) = send(&send_client, QUEUE_URL, &message).await {
-                eprintln!("Failed to send message: {:?}", err);
-            } else {
-                counter_clone.fetch_add(1, Ordering::Relaxed);
-            }
-
-            // Also try to receive messages in parallel
-            if let Err(err) = receive(&send_client, &QUEUE_URL.to_string()).await {
-                eprintln!("Failed to receive message: {:?}", err);
+            match receive(&client, &QUEUE_URL.to_string()).await {
+                Ok(count) => {
+                    recv_counter_clone.fetch_add(count, Ordering::Relaxed);
+                }
+                Err(err) => eprintln!("Failed to receive message: {:?}", err),
             }
         }
     });
 
     // Keep the main task alive
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for ctrl+c signal");
+    loop {}
 }
 
 async fn send(client: &Client, queue_url: &str, message: &SQSMessage) -> anyhow::Result<()> {
@@ -90,13 +108,9 @@ async fn send(client: &Client, queue_url: &str, message: &SQSMessage) -> anyhow:
     Ok(())
 }
 
-async fn receive(client: &Client, queue_url: &String) -> anyhow::Result<()> {
+async fn receive(client: &Client, queue_url: &String) -> anyhow::Result<usize> {
     let rcv_message_output = client.receive_message().queue_url(queue_url).send().await?;
 
     // ten at a time
-    for message in rcv_message_output.messages.unwrap_or_default() {
-        println!("Got the message: {:#?}", message);
-    }
-
-    Ok(())
+    Ok(rcv_message_output.messages.unwrap_or_default().len())
 }
