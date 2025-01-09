@@ -22,7 +22,7 @@ async fn send(client: &Client, queue_url: &str, message: &SQSMessage) -> anyhow:
     Ok(())
 }
 
-async fn receive(client: &Client, queue_url: &String) -> Result<(), Error> {
+async fn receive(client: &Client, queue_url: &String) -> anyhow::Result<()> {
     let rcv_message_output = client.receive_message().queue_url(queue_url).send().await?;
 
     // ten at a time
